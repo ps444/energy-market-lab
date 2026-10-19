@@ -14,7 +14,7 @@ def find_last_sunday(year, month):
     """
     Find the day number of the last Sunday in a given month and year.
 
-    For eanmple: find_last_sunday(2023, 3) returns 31 (March 26, 2023 is last Sunday)
+    For example: find_last_sunday(2023, 3) returns 26 (March 26, 2023 is last Sunday)
     """
 
     # Iterating backwards from last month
@@ -30,6 +30,16 @@ def find_last_sunday(year, month):
 
     return last_day.day
 
+# Local hour at which the clocks change, per location.
+# UK and France change on the same Sundays (both at 01:00 UTC), but local time differs:
+#   UK:     spring 01:00 -> 02:00 (01:xx skipped),  autumn 02:00 -> 01:00 (01:xx repeated)
+#   France: spring 02:00 -> 03:00 (02:xx skipped),  autumn 03:00 -> 02:00 (02:xx repeated)
+CLOCK_CHANGE_HOUR = {"UK": 1, "FRANCE": 2}
+
+# Currency used for display
+CURRENCY = {"UK": "£", "FRANCE": "€"}
+
+
 def is_dst_day(date_str, location):
 
     """
@@ -40,33 +50,56 @@ def is_dst_day(date_str, location):
         'long' if it's the fall back day (gain one hour)
         'normal' if it's a normal day
     """
-    
+
+    if location.upper() not in CLOCK_CHANGE_HOUR:
+        raise ValueError(f"Unsupported location '{location}'. Use 'UK' or 'France'.")
+
     # Convert string date to datetime object
     date = datetime.strptime(date_str, "%Y-%m-%d")
     year = date.year
     month = date.month
     day = date.day
 
-    # Add location UK
-    if location.upper() == "UK":
-        # Find last Sunday in March (spring forward - SHORT day)
-        march_last_sunday = find_last_sunday(year, 3)
+    # UK and France both change clocks on the last Sunday of March and October
+    # Find last Sunday in March (spring forward - SHORT day)
+    march_last_sunday = find_last_sunday(year, 3)
 
-        # Find last Sunday in October (fall back - LONG day)
-        october_last_sunday = find_last_sunday(year, 10)
+    # Find last Sunday in October (fall back - LONG day)
+    october_last_sunday = find_last_sunday(year, 10)
 
-        if month == 3 and day == march_last_sunday:
-            return 'short'
-        elif month == 10 and day == october_last_sunday:
-            return 'long'
-        else:
-            return 'normal'
-
+    if month == 3 and day == march_last_sunday:
+        return 'short'
+    elif month == 10 and day == october_last_sunday:
+        return 'long'
     else:
-        # For other locations, just return normal for now
         return 'normal'
 
-    
+
+def period_start_time(period, minutes_per_period, dst_type, location):
+
+    """
+    Convert a settlement period number into the local clock time it starts at.
+
+    Periods count real elapsed time from midnight, so on clock-change days the
+    local clock jumps: on a short day the change hour is skipped, on a long day
+    it appears twice.
+
+    For example, UK long day, hourly: periods 0, 1, 2, 3 start at 00:00, 01:00, 01:00, 02:00
+
+    Returns (hour, minute)
+    """
+
+    elapsed = period * minutes_per_period
+    change_minute = CLOCK_CHANGE_HOUR[location.upper()] * 60
+
+    if dst_type == 'short' and elapsed >= change_minute:
+        elapsed += 60   # Clocks jump forward an hour
+    elif dst_type == 'long' and elapsed >= change_minute + 60:
+        elapsed -= 60   # Clocks go back an hour
+
+    return elapsed // 60, elapsed % 60
+
+
 def time_function(func, parameter):
     # store current time in variable
     start_time = datetime.now()
@@ -87,15 +120,17 @@ def time_function(func, parameter):
         'prices': result
     } 
 
-def generate_realistic_prices(date_str, num_periods, granularity):
+def generate_realistic_prices(date_str, num_periods, granularity, dst_type='normal', location='UK'):
 
     """
-    Generate reslistic energy prices with seasonality, daily, and weekly patterns.
+    Generate realistic energy prices with seasonality, daily, and weekly patterns.
 
     Args:
         date_str: Date in "YYYY-MM-DD" format
-        num_period: Number of periods to generate
+        num_periods: Number of periods to generate
         granularity: "hourly" or "half-hourly"
+        dst_type: 'short', 'long' or 'normal' (from is_dst_day)
+        location: "UK" or "France"
 
     Returns:
         List of realistic prices
@@ -118,7 +153,7 @@ def generate_realistic_prices(date_str, num_periods, granularity):
         seasonal_mult = 0.8
     elif month in [3, 4, 5]:    # Spring (Mar, Apr, May)
         seasonal_mult = 1.0
-    elif month in [9, 10, 11]:    # Spring (Sep, Oct, Nov)
+    elif month in [9, 10, 11]:    # Autumn (Sep, Oct, Nov)
         seasonal_mult = 1.1
     
     # 2. WEEKLY MULTIPLIER (Based on day of week)
@@ -138,9 +173,8 @@ def generate_realistic_prices(date_str, num_periods, granularity):
 
     # Generate prices for each period
     for period in range(num_periods):
-        #   Calculate what time this period represents
-        minutes_from_midnight = period * minutes_per_period
-        hour = minutes_from_midnight // 60
+        #   Calculate the local clock time this period starts at (allows for clock changes)
+        hour, _ = period_start_time(period, minutes_per_period, dst_type, location)
 
         #   Time-of-day Multiplier
         if 0 <= hour < 6:   # Night Time (12am-6am)
@@ -149,7 +183,7 @@ def generate_realistic_prices(date_str, num_periods, granularity):
             time_mult = 1.2
         elif 9 <= hour < 17:  # Daytime (9am-5pm)
             time_mult = 1.0
-        elif 17 <= hour < 21:  # Evening Peak (6am-9am)
+        elif 17 <= hour < 21:  # Evening Peak (5pm-9pm)
             time_mult = 1.4
         else: # Late evening (9pm-12am)
             time_mult = 0.8
@@ -181,13 +215,19 @@ if __name__ == "__main__":
     print(f"Location: {location}")
     print()
 
-    # Confirm DST
-    dst_type = is_dst_day(date_input, location)
+    # Confirm DST (also checks the location is supported)
+    try:
+        dst_type = is_dst_day(date_input, location)
+    except ValueError as error:
+        print(f"Error: {error}")
+        sys.exit(1)
+
+    currency = CURRENCY[location.upper()]
 
     # Calculate number of periods based on granularity and DST
     if granularity.lower() == "hourly" or granularity.lower() == "h":
         if dst_type == 'short':
-            num_periods = 23    # Sring forward - lose hour - short day
+            num_periods = 23    # Spring forward - lose hour - short day
         elif dst_type == 'long':
             num_periods = 25    # Fall back - gain hour - long day
         else:
@@ -195,7 +235,7 @@ if __name__ == "__main__":
 
     elif granularity.lower() == "half-hourly" or granularity.lower() == "hh":
         if dst_type == 'short':
-            num_periods = 46    # Sring forward - lose hour - short day
+            num_periods = 46    # Spring forward - lose hour - short day
         elif dst_type == 'long':
             num_periods = 50    # Fall back - gain hour - long day
         else:
@@ -211,7 +251,7 @@ if __name__ == "__main__":
 
     # Generate realistic prices
     print("Generating realistic prices with seasonal, daily, and weekly patterns....")
-    realistic_prices = generate_realistic_prices(date_input, num_periods, granularity)
+    realistic_prices = generate_realistic_prices(date_input, num_periods, granularity, dst_type, location)
 
     # Also generate random prices for comparison
     print("Generating random prices for comparison...")
@@ -227,14 +267,13 @@ if __name__ == "__main__":
 
     # Show first 10 periods to see the pattern
     for i in range(min(10, num_periods)):
-        # Calculate what time this period represents
+        # Calculate the local clock time this period starts at (allows for clock changes)
         if granularity.lower() in ["hourly", "h"]:
-            minutes_from_midnight = i * 60
+            minutes_per_period = 60
         else:
-            minutes_from_midnight = i * 30
+            minutes_per_period = 30
 
-        hour = minutes_from_midnight // 60
-        minute = minutes_from_midnight % 60
+        hour, minute = period_start_time(i, minutes_per_period, dst_type, location)
         time_str = f"{hour:02d}:{minute:02d}"
 
         # Determine pattern description
@@ -245,11 +284,11 @@ if __name__ == "__main__":
         elif 9 <= hour < 17:
             pattern = "Daytime (Medium)"
         elif 17 <= hour < 21:  
-            pattern = "Evening Peak (Very High))"
+            pattern = "Evening Peak (Very High)"
         else: #  (9pm-12am)
             pattern = "Late Evening (Medium)"
 
-        print(f"{time_str:<10} £{realistic_prices[i]:<14.2f} £{random_prices[i]:<14.2f} {pattern:<30}")
+        print(f"{time_str:<10} {currency}{realistic_prices[i]:<14.2f} {currency}{random_prices[i]:<14.2f} {pattern:<30}")
     
     print("=" * 70)
     print()
@@ -263,8 +302,8 @@ if __name__ == "__main__":
     random_max = max(random_prices)
     
     print("STATISTICS:")
-    print(f"Realistic prices - Avg: £{realistic_avg:.2f}, Min: £{realistic_min:.2f}, Max: £{realistic_max:.2f}")
-    print(f"Random prices    - Avg: £{random_avg:.2f}, Min: £{random_min:.2f}, Max: £{random_max:.2f}")
+    print(f"Realistic prices - Avg: {currency}{realistic_avg:.2f}, Min: {currency}{realistic_min:.2f}, Max: {currency}{realistic_max:.2f}")
+    print(f"Random prices    - Avg: {currency}{random_avg:.2f}, Min: {currency}{random_min:.2f}, Max: {currency}{random_max:.2f}")
     print()
 
     # Run both methods  
@@ -273,7 +312,7 @@ if __name__ == "__main__":
 
     # Show timing results
     print(f"Method 1 (random module) took: {first_example['duration']}")
-    print(f"Method 2 (NumpPy) took: {second_example['duration']}")
+    print(f"Method 2 (NumPy) took: {second_example['duration']}")
     print()
 
 
