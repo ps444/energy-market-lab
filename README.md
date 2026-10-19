@@ -1,4 +1,4 @@
-# My Python Learning Journey: Random Price Generator
+# Python tools for modelling and analysing power markets, starting with a UK half-hourly price generator.
 
 Overview
 
